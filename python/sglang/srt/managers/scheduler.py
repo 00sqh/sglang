@@ -448,12 +448,8 @@ class Scheduler(
         self,
         server_args: ServerArgs,
         port_args: PortArgs,
-        gpu_id: int,
         tp_rank: int,
-        moe_ep_rank: int,
         pp_rank: int,
-        attn_cp_rank: int,
-        moe_dp_rank: int,
         dp_rank: Optional[int],
     ):
         # NOTE: KEEP THE FOLLOWING CODE STYLE for this function:
@@ -6041,12 +6037,8 @@ def run_scheduler_process(
         scheduler = Scheduler(
             server_args,
             port_args,
-            gpu_id,
             tp_rank,
-            moe_ep_rank,
             pp_rank,
-            attn_cp_rank,
-            moe_dp_rank,
             dp_rank,
         )
 
