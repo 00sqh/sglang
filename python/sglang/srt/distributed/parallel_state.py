@@ -2933,19 +2933,13 @@ def initialize_model_parallel(
             max_world_size=max_world_size,
         )
 
-    # The groups just built and the configuration they were built from are two
-    # accounts of one layout, and this is where they meet: stating a group
-    # checks the identities, so a group built on the wrong peers is refused
-    # here rather than hanging in a collective later.
-    #
-    # A dimension this configuration does not have is left unstated -- `_DCP`
-    # is None without decode context parallelism -- so reading it says the
-    # group was never built, which is what these getters have always said,
-    # rather than handing back a None to fail on at the collective.
-    #
-    # WORLD is not here: it is built and stated by
-    # `init_distributed_environment`, which is what lets every build above
-    # place its group by reading `get_world_group().local_rank`.
+    # Where the groups just built meet the configuration they were built from:
+    # stating one checks the identities. A dimension this configuration has not
+    # got is left unstated -- `_DCP` is None without decode context parallelism
+    # -- so reading it says the group was never built, which is what these
+    # getters have always said. WORLD is stated by
+    # `init_distributed_environment`, so that the builds above can place their
+    # groups by reading it.
     built = {
         "tp_group": _TP,
         "pp_group": _PP,
@@ -3059,8 +3053,7 @@ def patch_pipeline_parallel_group(pp_group: GroupCoordinator):
     old_pp_group = _PP
     _PP = pp_group
     try:
-        # `pp_size` is a configured leaf: unlike the rank and the handle it
-        # does not follow the group being swapped, so the scope has to name it.
+        # `pp_size` is a configured leaf: it does not follow the group.
         with get_parallel().override(
             pp_size=pp_group.world_size,
             pp_rank=pp_group.rank_in_group,
@@ -3458,18 +3451,15 @@ def monkey_patch_vllm_parallel_state(reverse: bool = False):
 
 # --- deprecation ---------------------------------------------------------
 #
-# These getters are the definition of a name, not a second spelling of it.
-# Business code asks `get_parallel()`, which answers by calling them and which
-# a scope can redirect; a call that arrives here directly cannot be redirected,
-# so a draft worker's scope does not reach it. The package that defines them
-# keeps calling them -- a read there would go through the context back into
-# itself -- so the warning fires only for callers outside it, and once per
-# name, because the point is to name the replacement rather than to fill a log.
+# Business code reads these through `get_parallel()`, which a scope can
+# redirect. Callers that go straight to a getter are warned, once per name.
+
+# Exempt: the package that defines them. The context is not a caller to warn --
+# it is the replacement -- and it reads the undecorated function.
 _EXEMPT_CALLERS = ("sglang.srt.distributed.",)
 
-# Which context name each getter here answers. The shim's own bookkeeping --
-# what a getter was replaced by is of no interest to whoever declares the field
-# -- so it is written next to the warning that uses it.
+# Which context name each getter answers: the shim's own bookkeeping, written
+# next to the warning that uses it.
 _CONTEXT_NAME_OF = {
     "get_world_group": "world_group",
     "get_tp_group": "tp_group",
@@ -3492,13 +3482,10 @@ _CONTEXT_NAME_OF = {
     "get_attn_context_model_parallel_rank": "attn_cp_rank",
     "get_dcp_rank": "dcp_rank",
 }
-# The width getters read a built group; the context answers the same names from
-# the configuration. Those are one answer rather than two only for the groups
-# the build checks against the configuration -- `_WIDTH_AND_GROUP` in
-# `runtime_context` -- so only those are listed here. `moe_dp`, `moe_tp` and
-# `dcp` are not on that list and are deliberately absent: the MoE-DP group is
-# the attention-CP group when the latter is wider, and the other two are simply
-# not pinned yet.
+# A width getter reads a built group; the context answers from configuration.
+# Only the groups in `_WIDTH_AND_GROUP` are checked to agree, so only those are
+# listed. `moe_dp` (aliased to attention-CP when that is wider), `moe_tp` and
+# `dcp` are absent.
 _CONTEXT_NAME_OF["get_tensor_model_parallel_world_size"] = "tp_size"
 _CONTEXT_NAME_OF["get_attn_tensor_model_parallel_world_size"] = "attn_tp_size"
 _CONTEXT_NAME_OF["get_attn_context_model_parallel_world_size"] = "attn_cp_size"
@@ -3538,9 +3525,7 @@ del _name, _replacement, _fn
 
 
 # What `from sglang.srt.distributed import *` re-exports: everything public
-# except the deprecated getters. Business code reaches them through
-# `get_parallel()`, and the package that defines them imports them from this
-# module by name, so nothing needs the package path to reach one.
+# except the deprecated getters.
 __all__ = [
     _public
     for _public in list(globals())

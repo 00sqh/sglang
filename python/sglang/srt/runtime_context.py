@@ -110,13 +110,9 @@ def _parallel_config_leaves() -> frozenset:
     )
 
 
-# Ranks and group handles: the names no configuration carries. This table is
-# their declaration, the way `arg_groups/fields/parallel.py` is the leaves' and
-# `Derived` is the widths'. A group handle names the getter that owns it,
-# because the module that builds the groups is where it lives; a rank is a
-# position in one of those groups, so it is read off the handle. `None` marks a
-# name only a stamp can answer: no coordinator knows this process's
-# attention-DP rank.
+# Ranks and group handles: the names no configuration carries. A group handle
+# names the getter that owns it; a rank is a position in one of those groups,
+# so it is read off the handle. `None` marks a stamp-only name.
 _MISSING_READ = object()
 
 
@@ -386,10 +382,8 @@ _RANK_AND_WIDTH = (
     ("moe_ep_rank", "moe_ep_size"),
 )
 
-# `moe_dp` is absent because `initialize_model_parallel` aliases the MoE-DP
-# group to the attention-CP group when the latter is wider: there the group and
-# the name are two facts, which is the same reason `moe_dp_rank` is left off the
-# record at publish.
+# `moe_dp` is absent: the MoE-DP group is the attention-CP group when that one
+# is wider, so there the group and the name are two facts.
 _WIDTH_AND_GROUP = (
     ("tp_size", "tp_group"),
     ("pp_size", "pp_group"),
@@ -1815,12 +1809,6 @@ def publish(
     if ranks is not None and ranks.gpu_id is not None:
         _CONTEXT.override("spawn", gpu_id=ranks.gpu_id)
     if ranks is not None:
-        # The placement, worked out here rather than carried: the widths are on
-        # the bag a moment ago, and `world_rank` fixes the rest. A read of any
-        # of these then needs no process group, which is the point -- they are
-        # read long before one exists. The scoped overrides that swap a group
-        # for a draft worker sit above the record in the read chain, so a
-        # scope still wins.
         parallel = _CONTEXT.parallel
         placement = derive_spawn_ranks(
             world_rank=ranks.world_rank,
@@ -1831,30 +1819,20 @@ def publish(
             moe_dp_size=parallel.moe_dp_size,
             moe_ep_size=parallel.moe_ep_size,
         )
-        # `initialize_model_parallel` aliases the MoE-DP group to the
-        # attention-CP one when the CP dimension is the wider of the two, so
-        # this process's place in it is its CP index rather than the MoE-DP
-        # index the arithmetic above gives.
+        # Aliased to attention-CP there, so this process's place in the group
+        # is its CP index and not the MoE-DP one the arithmetic above gives.
         if parallel.moe_dp_size < parallel.attn_cp_size:
             placement["moe_dp_rank"] = placement["attn_cp_rank"]
-        # `dp_rank` is recorded whatever it is, None included: replicas are
-        # separate WORLD groups, so no rank implies it and `None` is the answer
-        # "no controller" rather than an absence.
+        # `None` is an answer here -- "no controller" -- not an absence.
         placement["dp_rank"] = ranks.dp_rank
         placement["launch_world_rank"] = ranks.world_rank
         placement.update(_attention_ranks(parallel, placement["tp_rank"]))
-        # A DCP group is a contiguous slice of a TP group, so this process's
-        # place in one is its TP rank folded by that width. `attn_dcp_rank` is
-        # the same number, and zero where decode context parallelism is off, so
-        # a reader does not have to ask whether it is on first.
+        # A DCP group is a contiguous slice of a TP group; `attn_dcp_rank` is
+        # the same number, and zero where decode context parallelism is off.
         if parallel.dcp_enabled:
             placement["dcp_rank"] = placement["tp_rank"] % parallel.dcp_size
         placement["attn_dcp_rank"] = placement.get("dcp_rank", 0)
-        # One stamp, not two: the identities are checked on every write, and a
-        # half-placed process satisfies none of them.
         parallel.override_permanently(**placement)
-        # Publish established the whole layout, so every identity applies here,
-        # not just the ones the stamp happened to name.
         _validate_parallel(parallel, "publish")
     if _ROLE_NS_MODE == "record":
         # The '-' marker distinguishes a zero-read role from a process where
