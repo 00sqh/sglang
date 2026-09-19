@@ -45,10 +45,11 @@ class Device(msgspec.Struct):
         Arg(
             help=(
                 "Which device this process runs on. Not a topology: the parent "
-                "decides it -- reindexing narrows the visible devices before the "
-                "spawn, and Ray allocates from its own pool -- so the process "
-                "cannot compute it and the entry that was told it supplies it "
-                "before publishing."
+                "decides it -- reindexing narrows the visible devices before "
+                "the spawn, and Ray allocates from its own pool -- so the "
+                "process cannot compute it. The entry states it in the bundle "
+                "it hands `publish`, which stamps it onto the bag; the record "
+                "itself always reads `None`."
             ),
             no_cli=True,
         ),

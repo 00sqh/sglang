@@ -5983,9 +5983,6 @@ def run_scheduler_process(
     # Load plugins so hooks can override Scheduler and its dependencies.
     load_plugins()
     dp_rank = resolve_spawn_dp_rank(dp_rank)
-    # The parent picked the device -- reindexing narrows what this process can
-    # see, so it cannot work the number out for itself.
-    server_args.gpu_id = gpu_id
     # Publish before anything in this process reads configuration, with the
     # placement the launcher decided: from here on a rank read is answered
     # without a process group, which is what every reader needs before
@@ -5996,6 +5993,7 @@ def run_scheduler_process(
         ranks=SpawnRanks(
             world_rank=spawn_world_rank(server_args, tp_rank=tp_rank, pp_rank=pp_rank),
             dp_rank=dp_rank,
+            gpu_id=gpu_id,
         ),
     )
     configure_scheduler_process(
