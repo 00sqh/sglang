@@ -3227,5 +3227,6 @@ class TestNothingReadsThePlacementBeforeItIsFrozen(CustomTestCase):
         self.assertEqual(frozen, {"tp_rank"})
         self.assertEqual(self._reads(methods, methods["early"], frozen), {"tp_rank"})
 
+
 if __name__ == "__main__":
     unittest.main()
