@@ -192,6 +192,11 @@ class MultiLayerEagleDraftWorker(EagleDraftWorkerBase):
             "Step3p5MTP",
             "InklingForConditionalGenerationMTP",
         ]
+        # The draft runner is built outside any tensor-parallel scope, so it
+        # carries the target's topology: entering the scope later swaps the
+        # communicator without making this process a draft with an attention
+        # replica of its own. It still gathers with the target's replicas.
+        self.draft_owns_attention = False
         self.draft_tp_context = (
             draft_tp_context if get_parallel().enable_dp_attention else empty_context
         )
@@ -223,7 +228,10 @@ class MultiLayerEagleDraftWorker(EagleDraftWorkerBase):
     def init_attention_backends(self):
         with (
             draft_pp_context(),
-            self.draft_tp_context(self.draft_runner_list[0].tp_group),
+            self.draft_tp_context(
+                self.draft_runner_list[0].tp_group,
+                owns_attention=self.draft_owns_attention,
+            ),
             speculative_moe_backend_context(),
         ):
             super().init_attention_backends()
@@ -231,7 +239,10 @@ class MultiLayerEagleDraftWorker(EagleDraftWorkerBase):
     def init_cuda_graphs(self):
         with (
             draft_pp_context(),
-            self.draft_tp_context(self.draft_runner_list[0].tp_group),
+            self.draft_tp_context(
+                self.draft_runner_list[0].tp_group,
+                owns_attention=self.draft_owns_attention,
+            ),
             speculative_moe_backend_context(),
         ):
             super().init_cuda_graphs()
