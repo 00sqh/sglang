@@ -18,11 +18,15 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct CacheAwarePolicy {
     config: AffinityConfig,
+    images: super::session_aware::SessionAwarePolicy,
 }
 
 impl CacheAwarePolicy {
     pub fn new(config: AffinityConfig) -> Self {
-        Self { config }
+        Self {
+            images: super::session_aware::SessionAwarePolicy::new(config.clone()),
+            config,
+        }
     }
 
     fn cache_candidate_proposal(
@@ -175,6 +179,12 @@ impl Policy for CacheAwarePolicy {
         workers: &[Arc<Worker>],
         ctx: &SelectionContext<'_>,
     ) -> Option<PrefillProposal> {
+        if let Some(key) = ctx.image_key() {
+            return self
+                .images
+                .propose(workers, &ctx.clone().with_session_id(Some(key)))
+                .map(PrefillProposal::Pair);
+        }
         if ctx.affinity_lookup_enabled() {
             if let Some(proposal) = self.cache_candidate_proposal(workers, ctx) {
                 return Some(PrefillProposal::CacheCandidates(proposal));
@@ -184,6 +194,21 @@ impl Policy for CacheAwarePolicy {
             .with_load_control(self.config.min_load_choices, self.config.worker_queue_limit)
             .propose(workers, ctx)
             .map(PrefillProposal::Pair)
+    }
+
+    fn commit_prefill_selection(
+        &self,
+        ctx: &SelectionContext<'_>,
+        kind: ProposalKind,
+        selected: &Arc<Worker>,
+    ) {
+        if let Some(key) = ctx.image_key() {
+            self.images.commit_prefill_selection(
+                &ctx.clone().with_session_id(Some(key)),
+                kind,
+                selected,
+            );
+        }
     }
 
     fn needs_request_tokens(&self) -> bool {

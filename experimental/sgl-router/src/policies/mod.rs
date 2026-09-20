@@ -8,6 +8,7 @@ pub mod cache_aware;
 pub mod decode;
 pub mod engine_load;
 pub mod factory;
+pub(crate) mod image_affinity;
 pub mod kv_events;
 pub mod load_based;
 pub mod power_of_two;
@@ -172,6 +173,7 @@ pub struct SelectionContext<'a> {
     request_body: Option<&'a [u8]>,
     routing_key: Option<&'a str>,
     session_id: Option<&'a str>,
+    image_key: Option<&'a str>,
     candidate_range_id: &'a str,
     input_tokens: Option<u64>,
     request_tokens: Option<&'a [u32]>,
@@ -189,6 +191,7 @@ impl<'a> SelectionContext<'a> {
             request_body,
             routing_key: None,
             session_id: None,
+            image_key: None,
             candidate_range_id: "global",
             input_tokens: None,
             request_tokens: None,
@@ -210,6 +213,7 @@ impl<'a> SelectionContext<'a> {
             request_body,
             routing_key,
             session_id: None,
+            image_key: None,
             candidate_range_id: "global",
             input_tokens: None,
             request_tokens: None,
@@ -228,6 +232,15 @@ impl<'a> SelectionContext<'a> {
     }
 
     /// Attaches a Session-Aware session ID.
+    pub fn with_image_key(mut self, image_key: Option<&'a str>) -> Self {
+        self.image_key = image_key;
+        self
+    }
+
+    pub fn image_key(&self) -> Option<&'a str> {
+        self.image_key
+    }
+
     pub fn with_session_id(mut self, session_id: Option<&'a str>) -> Self {
         self.session_id = session_id;
         self
