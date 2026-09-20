@@ -14,6 +14,7 @@ from sglang.test.test_utils import CustomTestCase, maybe_stub_sgl_kernel
 maybe_stub_sgl_kernel()
 
 from sglang.srt.layers.moe import mega_moe
+from sglang.srt.runtime_context import get_parallel
 
 register_cpu_ci(est_time=8, suite="base-a-test-cpu")
 
@@ -264,9 +265,8 @@ class TestDeepGemmMegaMoeApi(CustomTestCase):
                 "init_new",
                 return_value=object(),
             ),
-            patch(
-                "sglang.srt.distributed.parallel_state.get_moe_ep_group",
-                return_value=SimpleNamespace(device_group=object()),
+            get_parallel().override(
+                moe_ep_group=SimpleNamespace(device_group=object())
             ),
         ):
             mega_moe._run_mega_routed(

@@ -132,6 +132,15 @@ def _sync_srt_tp_group() -> None:
         srt_parallel_state._ATTN_TP = _TP
     if srt_parallel_state._ATTN_TP is _TP:
         get_parallel().override_permanently(
+            # The group itself, because that is what the `srt` context answers
+            # a handle with -- assigning the module global above does not reach
+            # it. `tp_size` comes with them: the group is as wide as the world
+            # while the dummy carries this package's, and the widths below are
+            # quotients of one number, so stating a subset would describe a
+            # layout that does not exist.
+            tp_group=_TP,
+            attn_tp_group=_TP,
+            tp_size=_TP.world_size,
             **derive_parallel_widths(
                 tp_size=_TP.world_size,
                 attn_cp_size=1,

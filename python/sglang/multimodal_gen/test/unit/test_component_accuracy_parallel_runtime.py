@@ -2,6 +2,7 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
+import pytest
 import torch
 from torch import nn
 
@@ -147,11 +148,17 @@ def test_srt_attention_tp_group_tracks_diffusion_tp_group():
         assert srt_parallel_state._TP is tp_group
         assert srt_parallel_state._ATTN_TP is tp_group
         assert get_parallel().attn_tp_size == 2
+        # The handle too: assigning the module global does not reach the `srt`
+        # context, which is what the shared layers ask for a group.
+        assert get_parallel().tp_group is tp_group
+        assert get_parallel().attn_tp_group is tp_group
 
         parallel_state._clear_srt_tp_group()
 
         assert srt_parallel_state._TP is None
         assert srt_parallel_state._ATTN_TP is None
+        with pytest.raises(RuntimeError):
+            get_parallel().tp_group
 
 
 def test_srt_owned_groups_are_not_overwritten_or_cleared():
