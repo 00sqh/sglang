@@ -319,6 +319,7 @@ class DeepseekSparseAttnBackend(
         seed_dsa_topk_from_draft_extend: bool = False,
     ):
         super().__init__()
+        self._init_dcp(model_runner.is_draft_worker)
         self.forward_metadata: DSAMetadata
         self.device = model_runner.device
         assert isinstance(model_runner.page_size, int)
@@ -354,7 +355,8 @@ class DeepseekSparseAttnBackend(
         self.req_to_token = model_runner.req_to_token_pool.req_to_token
 
         self.use_mha: bool = False
-        # TODO(kpham-sgl): Enable MHA one-shot once it handles sharded prefix KV.
+        # TODO(kpham-sgl): Evaluate whether to enable MHA one-shot with DCP;
+        # handle sharded target and replicated draft prefix KV if enabled.
         self.supports_mha_one_shot: bool = not get_parallel().dcp_enabled
         self.dsa_prefill_impl: _DSA_IMPL_T = get_exec().kernel.dsa_prefill_backend
         self.dsa_decode_impl: _DSA_IMPL_T = get_exec().kernel.dsa_decode_backend
@@ -1990,16 +1992,19 @@ class DeepseekSparseAttnBackend(
                     cu_seqlens_q=metadata.cu_seqlens_q,
                 )
 
-        if get_parallel().dcp_enabled:
-            assert k is not None
-            kv_cache = self._dcp_gather_extend_kv(layer, forward_batch, k)
-            # NOTE(kpham-sgl): Map RAGGED offsets into gathered KV without reordering KV.
-            kv_indices = forward_batch.attn_dcp_metadata.dcp_kv_indices
-            page_table_1 = torch.where(
-                page_table_1 >= 0,
-                kv_indices[page_table_1.clamp_min(0)],
-                -1,
-            )
+        if self.dcp_size > 1:
+            if forward_batch.forward_mode.is_extend_without_speculative():
+                assert k is not None
+                kv_cache = self._dcp_gather_extend_kv(layer, forward_batch, k)
+                # NOTE(kpham-sgl): Map RAGGED offsets into gathered KV without reordering KV.
+                kv_indices = forward_batch.attn_dcp_metadata.dcp_kv_indices
+                page_table_1 = torch.where(
+                    page_table_1 >= 0,
+                    kv_indices[page_table_1.clamp_min(0)],
+                    -1,
+                )
+            elif forward_batch.forward_mode.is_target_verify():
+                page_table_1 = self._dcp_global_to_local_kv_indices(page_table_1)
 
         # todo hisparse: to cover more backends
         if self.hisparse_coordinator is not None:
@@ -2021,6 +2026,9 @@ class DeepseekSparseAttnBackend(
                 page_table_1=page_table_1,
                 sm_scale=layer.scaling,
                 v_head_dim=layer.v_head_dim,
+                return_lse=(
+                    self.dcp_size > 1 and forward_batch.forward_mode.is_target_verify()
+                ),
             )
         elif dsa_impl == "triton":
             from sglang.kernels.ops.attention.dsa.triton_sparse_mla import (
@@ -2281,7 +2289,7 @@ class DeepseekSparseAttnBackend(
                 page_size=1,
             )
 
-        if get_parallel().dcp_enabled:
+        if self.dcp_size > 1:
             page_table_1 = self._dcp_global_to_local_kv_indices(page_table_1)
 
         if dsa_impl == "flashmla_sparse":
@@ -2333,7 +2341,7 @@ class DeepseekSparseAttnBackend(
                 page_table_1=page_table_1,
                 sm_scale=layer.scaling,
                 v_head_dim=layer.v_head_dim,
-                return_lse=get_parallel().dcp_enabled,
+                return_lse=self.dcp_size > 1,
             )
         elif dsa_impl == "triton":
             return self._forward_triton_decode(
@@ -3603,7 +3611,7 @@ class DeepseekSparseAttnBackend(
         This method is used to select the topk transform method which can be fused or unfused.
         """
         # Note(kpham-sgl): Gathered prefill KV uses sequence offsets, not cache slots.
-        if get_parallel().dcp_enabled and forward_mode.is_extend_without_speculative():
+        if self.dcp_size > 1 and forward_mode.is_extend_without_speculative():
             return TopkTransformMethod.RAGGED
         if (
             # disable for MTP

@@ -3877,6 +3877,7 @@ class HybridLinearKVPool(KVCache):
         index_buf_size: Optional[int] = None,
         index_page_size: Optional[int] = None,
         index_kernel_page_size: Optional[int] = None,
+        dcp_replicated: bool = False,
     ):
         self.size = size
         self.dtype = dtype
@@ -3965,6 +3966,7 @@ class HybridLinearKVPool(KVCache):
                 index_buf_size=index_buf_size,
                 index_page_size=index_page_size,
                 index_kernel_page_size=index_kernel_page_size,
+                dcp_replicated=dcp_replicated,
             )
         else:
             TokenToKVPoolClass = MLATokenToKVPool
@@ -4531,11 +4533,18 @@ class MLATokenToKVPool(KVCache):
     # `kernel_page_blocks`: that is `layer_num`, so a rank owning one
     # full-attention layer is translated with blocks_per_page 1.
     write_loc_is_dcp_resolved = False
+    # TODO(kpham-sgl): Only DSA draft pools opt into replication here;
+    # generalize this to all draft pools in a follow-up.
+    dcp_replicated = False
 
     @property
     def _write_loc_dcp_span(self) -> int:
         """How many logical ids one stored row spans in the write-loc space."""
-        return 1 if self.write_loc_is_dcp_resolved else get_parallel().attn_dcp_size
+        return (
+            1
+            if self.write_loc_is_dcp_resolved or self.dcp_replicated
+            else get_parallel().attn_dcp_size
+        )
 
     def _scatter_mla_rows(
         self,
@@ -4544,7 +4553,7 @@ class MLATokenToKVPool(KVCache):
         cache_k_nope: torch.Tensor,
         cache_k_rope: torch.Tensor,
     ) -> None:
-        if self.write_loc_is_dcp_resolved:
+        if self.write_loc_is_dcp_resolved or self.dcp_replicated:
             set_mla_kv_buffer_triton(dst_buffer, loc, cache_k_nope, cache_k_rope)
         else:
             set_mla_kv_buffer_dcp_sharded_triton(
@@ -4912,7 +4921,9 @@ class DSATokenToKVPool(MLATokenToKVPool):
         skip_topk_layers: Optional[List[bool]] = None,
         index_page_size: Optional[int] = None,
         index_kernel_page_size: Optional[int] = None,
+        dcp_replicated: bool = False,
     ):
+        self.dcp_replicated = dcp_replicated
         override_dim = (
             kv_cache_dim if kv_cache_dim != kv_lora_rank + qk_rope_head_dim else None
         )
