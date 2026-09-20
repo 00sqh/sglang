@@ -73,6 +73,7 @@ pub const MAX_CHAT_BODY_BYTES: usize = 32 << 20;
 /// full request schema.
 #[derive(Debug, Default)]
 struct RequestProbe {
+    rid: Option<EngineRequestId>,
     stream: Option<bool>,
     model: Option<String>,
     /// Explicit output budget used by Decode Bucket routing.
@@ -82,6 +83,13 @@ struct RequestProbe {
     /// by [`SamplingField::index`] so governing another needs no change here.
     /// Read by [`apply_sampling_overrides`]; see [`ProbedValue`].
     sampling: [ProbedValue; SamplingField::ALL.len()],
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EngineRequestId {
+    Single(String),
+    Multiple(Vec<String>),
 }
 
 /// What the request said about one governed sampling parameter.
@@ -234,6 +242,7 @@ impl<'de> Deserialize<'de> for ProbedValue {
 /// decide on one copy while the engine serves the other.
 #[derive(Debug, Clone, Copy)]
 enum RoutingKey {
+    Rid,
     Stream,
     Model,
     MaxTokens,
@@ -246,6 +255,7 @@ impl RoutingKey {
     /// agreement with a separate length constant.
     const fn bit(self) -> u8 {
         match self {
+            Self::Rid => 1 << 4,
             Self::Stream => 1 << 0,
             Self::Model => 1 << 1,
             Self::MaxTokens => 1 << 2,
@@ -255,6 +265,7 @@ impl RoutingKey {
 
     const fn wire_name(self) -> &'static str {
         match self {
+            Self::Rid => "rid",
             Self::Stream => "stream",
             Self::Model => "model",
             Self::MaxTokens => "max_tokens",
@@ -287,6 +298,7 @@ impl<'de> Deserialize<'de> for ProbeKey {
 
             fn visit_str<E>(self, v: &str) -> Result<ProbeKey, E> {
                 Ok(match v {
+                    "rid" => ProbeKey::Routing(RoutingKey::Rid),
                     "stream" => ProbeKey::Routing(RoutingKey::Stream),
                     "model" => ProbeKey::Routing(RoutingKey::Model),
                     "max_tokens" => ProbeKey::Routing(RoutingKey::MaxTokens),
@@ -331,6 +343,7 @@ impl<'de> serde::de::Visitor<'de> for ProbeVisitor {
                     }
                     seen |= r.bit();
                     match r {
+                        RoutingKey::Rid => probe.rid = map.next_value()?,
                         RoutingKey::Stream => probe.stream = map.next_value()?,
                         RoutingKey::Model => probe.model = map.next_value()?,
                         RoutingKey::MaxTokens => probe.max_tokens = map.next_value()?,
@@ -875,6 +888,31 @@ pub async fn chat_completions(
         &inject_sampling,
     )?;
 
+    // PD prefill must outlive the client to complete its KV transfer.
+    let request_id = match (decode_peer.is_none(), probe.rid.as_ref()) {
+        (false, _) => None,
+        (true, Some(EngineRequestId::Single(rid))) => Some(rid.clone()),
+        (true, Some(EngineRequestId::Multiple(ids))) => {
+            tracing::debug!(
+                count = ids.len(),
+                "leaving batched request cancellation to the engine"
+            );
+            None
+        }
+        (true, None) => Some(
+            headers
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        ),
+    };
+    let outgoing_body = match request_id.as_deref() {
+        Some(rid) if probe.rid.is_none() => inject_request_id(&outgoing_body, rid)?,
+        _ => outgoing_body,
+    };
+
     let result = if let Some(decode_worker) = decode_peer {
         // PD-disagg dispatch (Pattern B — spawn prefill, await decode).
         //
@@ -937,6 +975,7 @@ pub async fn chat_completions(
                     "/v1/chat/completions",
                     &prefill_headers,
                     prefill_body,
+                    None,
                 )
                 .await
             {
@@ -974,6 +1013,7 @@ pub async fn chat_completions(
                 Some(stream_guards),
                 Some(make_ttft_hook()),
                 Some(make_stream_end_hook(decode_worker.url.clone())),
+                None,
             );
             tokio::select! {
                 biased;
@@ -989,6 +1029,7 @@ pub async fn chat_completions(
                 "/v1/chat/completions",
                 &headers,
                 outgoing_body,
+                None,
             );
             tokio::select! {
                 biased;
@@ -1012,6 +1053,7 @@ pub async fn chat_completions(
             Some(stream_guards),
             Some(make_ttft_hook()),
             Some(make_stream_end_hook(worker.url.clone())),
+            request_id.as_deref(),
         );
         // Bias `fetch` over the cancellation branch: a successful
         // response that completes in the same poll as the token firing
@@ -1039,6 +1081,7 @@ pub async fn chat_completions(
             "/v1/chat/completions",
             &headers,
             outgoing_body,
+            request_id.as_deref(),
         );
         // Same `biased` order as the streaming arm.
         tokio::select! {
@@ -1251,6 +1294,18 @@ fn should_tokenize_request(
 /// Exact ingress tokens are preferred when available.
 fn estimate_prefill_tokens(body: &Bytes) -> usize {
     (body.len() / CHARS_PER_TOKEN_ESTIMATE).max(1)
+}
+
+fn inject_request_id(body: &Bytes, rid: &str) -> Result<Bytes, ApiError> {
+    let close = body
+        .iter()
+        .rposition(|&b| b == b'}')
+        .ok_or_else(|| ApiError::BadRequest("expected a JSON object".into()))?;
+    let mut out = body[..close].to_vec();
+    out.extend_from_slice(b",\"rid\":");
+    serde_json::to_writer(&mut out, rid).map_err(|e| ApiError::Internal(e.into()))?;
+    out.extend_from_slice(&body[close..]);
+    Ok(Bytes::from(out))
 }
 
 /// Mint a fresh `bootstrap_room` for a PD-disagg request.
@@ -1735,6 +1790,25 @@ mod tests {
     /// An unavailable indexer must never fail a request that min-load routing
     /// can still serve. `QueryTooLarge` belongs here too: a prompt that outgrows
     /// the query's message limit loses cache affinity, not availability.
+
+    #[test]
+    fn request_id_probe_preserves_single_and_batched_ids() {
+        assert!(serde_json::from_str::<RequestProbe>(r#"{"rid":"a","rid":"b"}"#).is_err());
+        let single = serde_json::from_str::<RequestProbe>(r#"{"rid":"client-id"}"#).unwrap();
+        assert!(matches!(single.rid, Some(EngineRequestId::Single(id)) if id == "client-id"));
+        let batch = serde_json::from_str::<RequestProbe>(r#"{"rid":["a","b"]}"#).unwrap();
+        assert!(matches!(batch.rid, Some(EngineRequestId::Multiple(ids)) if ids == ["a", "b"]));
+    }
+
+    #[test]
+    fn request_id_injection_escapes_and_preserves_existing_bytes() {
+        let raw = Bytes::from_static(br#"{ "model": "tiny", "temperature": 1.00 }  "#);
+        let body = inject_request_id(&raw, "id\"quoted").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["rid"], "id\"quoted");
+        assert!(std::str::from_utf8(&body).unwrap().contains("1.00"));
+    }
+
     #[test]
     fn unavailable_indexer_degrades_to_empty_prefix_signal() {
         for error in [

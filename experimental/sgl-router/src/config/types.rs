@@ -26,9 +26,12 @@ pub struct Config {
 #[derive(Debug, Clone, Copy)]
 pub struct ProxyConfig {
     /// Maximum time to wait for a single upstream HTTP request to
-    /// return headers + body. Default 300 s. The circuit breaker
+    /// return headers + body (headers only for streaming). Default 300 s. The circuit breaker
     /// records a failure when this fires.
     pub request_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
+    pub stream_send_stall_secs: u64,
+    pub stream_total_timeout_secs: u64,
 }
 
 pub fn default_proxy_request_timeout_secs() -> u64 {
@@ -39,6 +42,9 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             request_timeout_secs: default_proxy_request_timeout_secs(),
+            stream_idle_timeout_secs: 180,
+            stream_send_stall_secs: 180,
+            stream_total_timeout_secs: 3600,
         }
     }
 }

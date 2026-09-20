@@ -226,12 +226,16 @@ async fn main() -> Result<()> {
         Some(Arc::clone(&active_load)),
     ));
 
-    let proxy = Arc::new(
-        sgl_router::proxy::Proxy::new(std::time::Duration::from_secs(
-            cfg.proxy.request_timeout_secs,
-        ))
-        .context("build proxy client")?,
-    );
+    let mut proxy = sgl_router::proxy::Proxy::new(std::time::Duration::from_secs(
+        cfg.proxy.request_timeout_secs,
+    ))
+    .context("build proxy client")?;
+    proxy.stream_timeouts = sgl_router::proxy::sse::StreamTimeouts {
+        idle: std::time::Duration::from_secs(cfg.proxy.stream_idle_timeout_secs),
+        send_stall: std::time::Duration::from_secs(cfg.proxy.stream_send_stall_secs),
+        total: std::time::Duration::from_secs(cfg.proxy.stream_total_timeout_secs),
+    };
+    let proxy = Arc::new(proxy);
 
     let mut app_ctx = sgl_router::server::app_context::AppContext::with_active_load(
         cfg.clone(),
