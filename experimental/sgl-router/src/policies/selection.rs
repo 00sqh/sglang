@@ -54,7 +54,6 @@ pub(crate) struct PrefillSelectionInputs<'a> {
     pub body: Option<&'a [u8]>,
     pub routing_key: Option<&'a str>,
     pub session_id: Option<&'a str>,
-    pub image_key: Option<&'a str>,
     pub request_input_tokens: u64,
     pub request_tokens: Option<&'a [u32]>,
     pub external_prefix: Option<&'a ExternalPrefixSignal>,
@@ -175,7 +174,7 @@ impl<'a> Selector<'a> {
             SessionAffinityMode::Bucket
         };
         let use_global_affinity_probe = inputs.bucket_selector.is_enabled()
-            && (inputs.policy.is_bucket_affinity_policy() || inputs.image_key.is_some())
+            && inputs.policy.is_bucket_affinity_policy()
             && session_affinity_mode != SessionAffinityMode::Bucket;
 
         // Cache-Aware resolves one bounded global candidate set and returns a final winner.
@@ -219,7 +218,7 @@ impl<'a> Selector<'a> {
                     .bucket_selector
                     .prefill_domains(inputs.workers, bucket_request)
             };
-            if inputs.policy_kind == PolicyKind::CacheAware && inputs.image_key.is_none() {
+            if inputs.policy_kind == PolicyKind::CacheAware {
                 // Cache miss or failure retries ordered domains with ordinary P2.
                 return self.select_domains(&prefill_domains(), false, false);
             }
@@ -245,11 +244,7 @@ impl<'a> Selector<'a> {
         // reached nothing book `cache_worker_queued` and contribute to
         // `sgl_router_diverted_overlap_blocks` — a diversion that never
         // arrived is not evidence about what the gate traded away.
-        if inputs.policy_kind == PolicyKind::CacheAware
-            && inputs.image_key.is_none()
-            && !cache_winner_hit
-            && selected.is_some()
-        {
+        if inputs.policy_kind == PolicyKind::CacheAware && !cache_winner_hit && selected.is_some() {
             let (rejected, evaluated, fleet_all_queued, blocks) =
                 self.cache_gate_audit.unwrap_or((0, 0, false, 0));
             let decision = cache_aware_fallback_decision(rejected, evaluated, fleet_all_queued);
@@ -274,7 +269,6 @@ impl<'a> Selector<'a> {
         let inputs = self.inputs;
         SelectionContext::with_routing_key(inputs.model_id, inputs.body, inputs.routing_key)
             .with_session_id(inputs.session_id)
-            .with_image_key(inputs.image_key)
             .with_candidate_range_id(candidate_range_id)
             .with_input_tokens(inputs.request_input_tokens)
             .with_request_tokens(inputs.request_tokens)
@@ -284,7 +278,7 @@ impl<'a> Selector<'a> {
     fn cache_winner(&mut self) -> Option<Arc<Worker>> {
         let inputs = self.inputs;
         let bucket_request = self.bucket_request;
-        if inputs.policy_kind != PolicyKind::CacheAware || inputs.image_key.is_some() {
+        if inputs.policy_kind != PolicyKind::CacheAware {
             return None;
         }
         let snapshot = inputs.load_snapshot?;
@@ -829,7 +823,6 @@ mod tests {
             body: None,
             routing_key: None,
             session_id: None,
-            image_key: None,
             request_input_tokens,
             request_tokens: None,
             external_prefix: None,
@@ -863,38 +856,6 @@ mod tests {
             tps_slo: None,
             load_snapshot,
         }
-    }
-
-    #[test]
-    fn image_affinity_survives_load_changes_but_respects_admission() {
-        let workers = vec![worker("a"), worker("b")];
-        let policy = CacheAwarePolicy::new(AffinityConfig::default());
-        let buckets = BucketSelector::new(None);
-        let metrics = MetricsRegistry::new();
-        let model = ModelId("model".into());
-        let loads = queued_snapshot(&[(&workers[0], 0, 0, 10_000), (&workers[1], 0, 0, 10_000)]);
-        let mut inputs = prefill_inputs(
-            &policy,
-            &buckets,
-            &metrics,
-            &model,
-            &workers,
-            Some(&loads),
-            100,
-        );
-        inputs.policy_kind = PolicyKind::CacheAware;
-        inputs.image_key = Some("same-image");
-        let selected = select_prefill_worker(&inputs).unwrap();
-        for _ in 0..10 {
-            assert_eq!(select_prefill_worker(&inputs).unwrap().id, selected.id);
-        }
-        let other = workers.iter().find(|w| w.id != selected.id).unwrap();
-        let full = queued_snapshot(&[(&selected, 9, 10_000, 10_000), (other, 0, 0, 10_000)]);
-        inputs.load_snapshot = Some(&full);
-        inputs.worker_queue_limit = Some(4);
-        assert_eq!(select_prefill_worker(&inputs).unwrap().id, other.id);
-        inputs.load_snapshot = Some(&loads);
-        assert_eq!(select_prefill_worker(&inputs).unwrap().id, selected.id);
     }
 
     #[test]

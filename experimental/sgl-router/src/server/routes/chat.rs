@@ -545,18 +545,11 @@ pub async fn chat_completions(
     // forwarded as `input_ids` so it skips re-tokenizing the same prompt. The
     // ingress owns the tokenize via the shared registry, so the choice of
     // policy never changes whether we tokenize.
-    let image_key = (ctx.config.model.policy == crate::config::PolicyKind::CacheAware)
-        .then(|| {
-            request_value
-                .as_ref()
-                .and_then(crate::policies::image_affinity::key)
-        })
-        .flatten();
     let request_tokens = request_value
         .as_ref()
         .and_then(|v| request_tokens_for(&ctx.tokenizers, &model_id, v));
     let external_prefix = match (
-        ctx.prefix_index.as_ref().filter(|_| image_key.is_none()),
+        ctx.prefix_index.as_ref(),
         request_tokens.as_ref(),
         ctx.block_size_oracle.get(),
     ) {
@@ -666,7 +659,6 @@ pub async fn chat_completions(
     // Each Bucket retry rebuilds the proposal and reruns Admission/Guard.
     let worker = select_prefill_worker(&PrefillSelectionInputs {
         policy: policy.as_ref(),
-        image_key: image_key.as_deref(),
         policy_kind: ctx.config.model.policy,
         bucket_selector: ctx.bucket_selector.as_ref(),
         metrics: ctx.metrics.as_ref(),

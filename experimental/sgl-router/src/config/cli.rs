@@ -391,16 +391,17 @@ impl Cli {
             self.policy,
             PolicyKind::SessionAware | PolicyKind::CacheAware
         );
-        let tuned_session_affinity =
-            self.session_id_header.is_some() || self.stable_pair || self.affinity_mode.is_some();
-        if tuned_session_affinity && self.policy != PolicyKind::SessionAware {
-            return Err(anyhow!("--session-id-header, --stable-pair, and --affinity-mode require --policy session_aware"));
-        }
-        let tuned_assignment = self.session_idle_secs.is_some()
+        let tuned_session_affinity = self.session_id_header.is_some()
+            || self.session_idle_secs.is_some()
             || self.session_eviction_interval_secs.is_some()
+            || self.stable_pair
+            || self.affinity_mode.is_some()
             || self.session_affinity_mode.is_some();
-        if tuned_assignment && !affinity_policy {
-            return Err(anyhow!("--session-*-secs and --session-affinity-mode require --policy session_aware or cache_aware"));
+        if tuned_session_affinity && self.policy != PolicyKind::SessionAware {
+            return Err(anyhow!(
+                "--session-id-header, --session-*-secs, --stable-pair, --affinity-mode, and \
+                 --session-affinity-mode require --policy session_aware"
+            ));
         }
         if self.disable_pressure_guard && !affinity_policy {
             return Err(anyhow!(
@@ -858,17 +859,6 @@ mod tests {
     fn into_config_owned(args: Vec<String>) -> Result<Config> {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         into_config(&refs)
-    }
-
-    #[test]
-    fn cache_aware_accepts_image_assignment_settings() {
-        let cfg = cfg_of("--policy cache_aware --session-idle-secs 120 --session-eviction-interval-secs 10 --session-affinity-mode global-rebind").unwrap();
-        let affinity = cfg.model.affinity.unwrap();
-        assert_eq!(affinity.session_idle_secs, 120);
-        assert_eq!(
-            affinity.session_affinity_mode,
-            SessionAffinityMode::GlobalRebind
-        );
     }
 
     #[test]
